@@ -1,0 +1,6 @@
+gtfs-realtime-bindings==2.2.0
+protobuf>=6.31.1,<8
+numpy>=1.26,<3
+matplotlib>=3.8,<4
+tzdata>=2024.1
+scikit-learn>=1.4,<2
