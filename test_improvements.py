@@ -6,7 +6,9 @@ import unittest
 from pathlib import Path
 
 from arrival_rules import crossing_events
-from evaluate import features, split_rows, metric_rows, evaluate_runs, write_csv
+import numpy as np
+
+from evaluate import asymmetric_squared_objective, features, split_rows, metric_rows, evaluate_runs, write_csv
 
 
 class CrossingTests(unittest.TestCase):
@@ -48,6 +50,14 @@ class CrossingTests(unittest.TestCase):
 
 
 class EvaluationTests(unittest.TestCase):
+    def test_xgboost_objective_penalizes_late_error_and_preserves_event_weights(self):
+        truth = np.array([100., 100., 100.])
+        prediction = np.array([90., 110., 100.])
+        weights = np.array([.5, .5, 1.])
+        gradient, hessian = asymmetric_squared_objective(truth, prediction, sample_weight=weights, late_penalty=2)
+        np.testing.assert_allclose(gradient, [-5., 10., 0.])
+        np.testing.assert_allclose(hessian, [.5, 1., 1.])
+
     def row(self):
         return dict(latitude=36, longitude=-84, along_route_distance_m=500,
             straight_line_distance_m=400, gps_age_seconds=2, scheduled_remaining_seconds=100,
@@ -84,6 +94,8 @@ class EvaluationTests(unittest.TestCase):
                 for e,p in [('a',100), ('a',100), ('b',160)]]
         overall = [m for m in metric_rows(rows) if m['subset']=='all']
         self.assertTrue(all(m['samples']==3 and m['mae_seconds']==20 and m['event_balanced_mae_seconds']==30 for m in overall))
+        self.assertTrue(all(m['late_prediction_rate'] == 1/3 for m in overall))
+        self.assertTrue(all(m['late_penalized_rmse_seconds'] == np.sqrt(2400) for m in overall))
 
     def test_end_to_end_shared_test_set_and_missing_eta(self):
         with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as folder:
@@ -109,7 +121,14 @@ class EvaluationTests(unittest.TestCase):
             with (run/'evaluation'/'predictions.csv').open(encoding='utf-8-sig') as stream:
                 predictions = list(csv.DictReader(stream))
             self.assertEqual(len({r['sample_id'] for r in predictions}), 36)
-            self.assertTrue(all(r['model_prediction_seconds'] and r['official_eta_prediction_seconds'] and r['schedule_prediction_seconds'] for r in predictions))
+            for field in ('model_prediction_seconds', 'xgboost_prediction_seconds',
+                          'official_eta_prediction_seconds', 'schedule_prediction_seconds'):
+                self.assertTrue(all(np.isfinite(float(row[field])) for row in predictions))
+            with (run/'evaluation'/'metrics.csv').open(encoding='utf-8-sig') as stream:
+                metrics = [m for m in csv.DictReader(stream) if m['subset'] == 'all']
+            self.assertEqual([(m['method'], int(m['samples'])) for m in metrics],
+                             [(name, 36) for name in ('model', 'xgboost', 'schedule', 'official_eta')])
+            self.assertTrue((run/'evaluation'/'xgboost_vs_random_forest.png').is_file())
 
 
 if __name__ == '__main__':

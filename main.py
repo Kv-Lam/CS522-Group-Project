@@ -25,6 +25,7 @@ import numpy as np
 from google.transit import gtfs_realtime_pb2 as pb
 from punctuality import generate as generate_punctuality
 from arrival_rules import crossing_events
+from evaluate import DEFAULT_LATE_PENALTY, add_model_options, evaluate_runs, require_xgboost
 
 URLS = {'static': 'https://knoxville.syncromatics.com/GTFS',
         'vehicles': 'https://knoxville.syncromatics.com/GTFS-rt/VehiclePositions',
@@ -486,7 +487,8 @@ def write_csv(path, rows, fields):
 
 
 # Label samples and generate the run's data files, reports, evaluations, and plots.
-def outputs(run, processor, requests, ticks, error=None, early=60, late=300):
+def outputs(run, processor, requests, ticks, error=None, early=60, late=300, *,
+            model='both', late_penalty=DEFAULT_LATE_PENALTY):
     p = processor
     events = list(p.events.values()) if p else []
     labeled, excluded = [], list(p.excluded) if p else []
@@ -581,8 +583,7 @@ def outputs(run, processor, requests, ticks, error=None, early=60, late=300):
               '- Split future datasets by service date or trip instance and keep an arrival event in one split. Collect more independent events before assessing ETA accuracy or training.',
               '', 'Specification: https://gtfs.org/documentation/realtime/reference/']
     lines += generate_punctuality(run, events, p.static if p else None, selected, early, late)
-    from evaluate import evaluate_runs
-    evaluation = evaluate_runs([run], run / 'evaluation')
+    evaluation = evaluate_runs([run], run / 'evaluation', model=model, late_penalty=late_penalty)
     lines += ['', '## Matched model comparison', '', evaluation,
               'See evaluation/report.md, predictions.csv and model_comparison.png. All methods use identical held-out samples.']
     (run / 'report.md').write_text('\n'.join(lines)+'\n', encoding='utf-8')
@@ -610,7 +611,7 @@ def outputs(run, processor, requests, ticks, error=None, early=60, late=300):
 
 
 # Replay saved feeds and regenerate derived outputs without making network calls.
-def postprocess(run, early=60, late=300, label_mode='enhanced'):
+def postprocess(run, early=60, late=300, label_mode='enhanced', *, model='both', late_penalty=DEFAULT_LATE_PENALTY):
     save_json(run / 'processing_config.json', {'rule_version': 'arrival_rules_v2', 'label_mode': label_mode,
               'max_age_seconds': MAX_AGE, 'max_gap_seconds': MAX_GAP,
               'clock_tolerance_seconds': CLOCK_TOLERANCE,
@@ -629,7 +630,7 @@ def postprocess(run, early=60, late=300, label_mode='enhanced'):
     except Exception as exc:
         error = f'{type(exc).__name__}: {exc}'
         logging.exception('Replay failed')
-    outputs(run, processor, requests, ticks, error, early, late)
+    outputs(run, processor, requests, ticks, error, early, late, model=model, late_penalty=late_penalty)
     return error
 
 
@@ -681,7 +682,9 @@ def collect(args):
     finally:
         metadata['ended_utc'] = utc(time.time())
         save_json(run / 'run.json', metadata)
-        error = postprocess(run, early=getattr(args, 'early_seconds', 60), late=getattr(args, 'late_seconds', 300))
+        error = postprocess(run, early=getattr(args, 'early_seconds', 60), late=getattr(args, 'late_seconds', 300),
+                            model=getattr(args, 'model', 'both'),
+                            late_penalty=getattr(args, 'late_penalty', DEFAULT_LATE_PENALTY))
         logging.getLogger().removeHandler(handler)
         handler.close()
     return 1 if metadata['status'] == 'failed' or error else 0
@@ -701,6 +704,7 @@ def build_parser():
     replay_parser.add_argument('run_directory', type=Path)
     replay_parser.add_argument('--label-mode', choices=['strict', 'enhanced'], default='enhanced')
     for command_parser in (collect_parser, replay_parser):
+        add_model_options(command_parser)
         command_parser.add_argument('--early-seconds', type=float, default=60,
                                     help='Allowed early arrival for research punctuality (default: 60)')
         command_parser.add_argument('--late-seconds', type=float, default=300,
@@ -730,7 +734,8 @@ def validate_args(parser, args):
 # Dispatch the selected CLI command and return its process exit status.
 def run_command(args):
     if args.command == 'postprocess':
-        error = postprocess(args.run_directory.resolve(), args.early_seconds, args.late_seconds, args.label_mode)
+        error = postprocess(args.run_directory.resolve(), args.early_seconds, args.late_seconds, args.label_mode,
+                            model=args.model, late_penalty=args.late_penalty)
         return 1 if error else 0
     return collect(args)
 
@@ -744,6 +749,11 @@ def main():
     args = parse_args(parser)
     configure_logging()
     validate_args(parser, args)
+    if args.model != 'random-forest':
+        try:
+            require_xgboost()
+        except ImportError as exc:
+            parser.error(str(exc))
     return run_command(args)
 
 

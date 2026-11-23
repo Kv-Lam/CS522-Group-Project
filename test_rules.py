@@ -71,7 +71,7 @@ class ArrivalRulesTests(unittest.TestCase):
             args = SimpleNamespace(output=str(run), duration_minutes=60, interval=30, timeout=1, retries=0)
             with patch('main.fetch', side_effect=KeyboardInterrupt), patch('main.postprocess', return_value=None) as replay:
                 self.assertEqual(collect(args), 0)
-                replay.assert_called_once_with(run, early=60, late=300)
+                replay.assert_called_once_with(run, early=60, late=300, model='both', late_penalty=2.0)
             self.assertIn('interrupted', (run / 'run.json').read_text())
 
     def test_future_predictions_are_not_labels_and_gaps_excluded(self):

@@ -164,16 +164,26 @@ python .\evaluate.py .\runs\20260915T193508_851091Z .\runs\short_test --output .
 python .\main.py postprocess .\runs\20260915T193508_851091Z --label-mode strict
 ```
 
-`evaluate.py` uses scikit-learn; version 1.9.1 is installed in the current environment and has been added to `requirements.txt`. Standalone evaluation does not reconnect to the network. Duplicate `sample_id` values across runs are deduplicated and recorded, and each complete `trip_instance_id` stays on one side of the split.
+### Train on server data
+
+Install the dependencies using `python -m pip install -r requirements.txt`. Pass one or more completed run directories, each containing `training_samples.csv` and `punctuality_events.csv` from the same run. If you have a raw run instead, first run `python main.py postprocess /path/to/raw_run` on the complete directory, including `requests.jsonl`, `ticks.jsonl`, and `raw/`. All of these commands work offline after dependency installation.
+
+```sh
+python evaluate.py /path/to/run_a /path/to/run_b --split date --model both --late-penalty 2 --output results/final_comparison
+```
+
+`both` is the default. Use `--model xgboost` for XGBoost plus the two transit baselines, or `--model random-forest` for the original model plus the baselines. Use a separate output directory for each evaluation configuration. The default `--split auto` uses the date protocol for multiple service dates and grouped trip cross-validation for a single date. `--split date` requires multiple dates and reports insufficient data if the split cannot be used. Duplicate samples across runs are recorded and excluded.
+
+If the GPS label says 120 seconds and the model predicts 150, its error is +30 seconds and XGBoost applies the higher weight. A 90-second prediction has error −30 seconds and uses the normal weight. `--late-penalty 2` doubles the **squared** positive error in XGBoost training and in the late-penalized RMSE for every predictor. `--late-penalty 1` gives symmetric squared error. Ordinary MAE/RMSE still count early and late errors equally. Late prediction rate is the fraction of predictions after the GPS label. `mean_late_error_seconds` averages positive error over all rows, counting zero for other rows.
 
 ### Evaluation Protocol
 
-1. The model predicts `remaining_travel_time_seconds`. A fixed random forest is used (150 trees, depth 12, minimum leaf size 3, random seed 42), with no test-set tuning. Each training arrival event has equal total sample weight.
+1. Both models predict `remaining_travel_time_seconds`. XGBoost uses 250 trees, a maximum depth of 5, a learning rate of 0.05, and the asymmetric loss above. The random forest uses its original 150 trees, depth 12, minimum leaf size 3, and symmetric loss. Both use seed 42, fixed settings, and an equal base weight per training arrival event. XGBoost predictions below zero are set to zero.
 2. Only observation-time features are used: latitude/longitude, straight-line/along-route distance, GPS age, local time, weekday, route, direction, target stop, and scheduled remaining time. **Official ETA, labels, future positions, event IDs, trip IDs, and confidence are not model inputs.** Feature encoding is fitted only on training folds.
 3. Comparison data must have a valid label, features, static schedule time, and official ETA from that time. Any missing item is excluded uniformly; methods cannot use different test sets. Schedule time and official ETA are not clipped at zero.
 4. With two or more service dates, the final 20% of dates are used for testing and earlier dates for training; training samples whose label intervals overlap the test start are removed. With one date, trip-grouped cross-validation is run only with at least three trip instances; this is exploratory and does not represent future-date performance.
 5. At least 30 common samples, 6 events, and 3 trips are required; each valid training fold needs at least 10 samples, 3 events, and 2 trips. These are run thresholds, not claims of statistical sufficiency. If unmet, the output states insufficient data and does not fall back to a leakage-prone random sample split. Skipped folds are listed.
-6. Each test sample retains model, schedule, and official ETA predictions together. The report includes MAE, RMSE, bias, event-balanced MAE, and distance to the label interval. Results are also reported by route, confidence, and the original strict-label subset; these subsets use the same fitted models. Strict labels can be trained separately with `--quality strict` above.
+6. Each test sample retains the selected model predictions, schedule, and official ETA together. Metrics include MAE, RMSE, bias, event-balanced MAE, distance to the label interval, late prediction rate, and late-penalized RMSE. Metrics are also reported by route, confidence, and strict-label subset using the same fitted models. Use `--quality strict` to train a separate evaluation on strict labels only.
 
 ### New Outputs
 
@@ -181,11 +191,12 @@ Each run directory contains `evaluation/`:
 
 | File | Contents |
 |---|---|
-| `report.md` | Common-sample comparison of the three methods, split method, and limitations |
-| `model_comparison.png` | English comparison of MAE, RMSE, and event-balanced MAE |
-| `predictions.csv` | Three predictions, label interval, fold, and event/trip IDs for each test sample |
+| `report.md` | Common-sample comparison, split method, and limitations |
+| `model_comparison.png` | English comparison of MAE, RMSE, event-balanced MAE, and late-penalized RMSE |
+| `xgboost_vs_random_forest.png` | The two trained models side by side when using `--model both` |
+| `predictions.csv` | All predictions, label interval, fold, and event/trip IDs for each test sample. `xgboost_prediction_seconds` is XGBoost and `model_prediction_seconds` remains random forest. |
 | `metrics.csv` | Overall evaluation metrics and metrics by route and label confidence |
 | `evaluation.json` | Parameters, input checksums, software versions, feature list, training/test trip lists, and skipped folds |
 | `excluded_samples.csv` | Samples excluded from common comparison and reasons |
 
-Evaluation trains one model per fold and does not export a deployment model. The current data has only 3 trips, multiple related events on the same route, and shared information between GPS features and inferred labels, creating a risk of bias. More days of data, future-date holdouts, and independent arrival-label audits are needed before claiming an advantage over official ETA; the weather experiment remains future work.
+Evaluation fits each selected model separately in each fold and saves held-out predictions. The GPS labels and features share information, and samples from the same trip are correlated. Use the longer server dataset and a date holdout for the final evaluation, with results referring to the GPS-derived labels.
